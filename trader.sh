@@ -155,6 +155,11 @@ function clocklabel(n, format) {
     format=interval=="1d" ? "%Y-%m-%d" : "%m-%d %H:%M"
     return strftime(format,timestamp[n])
 }
+# Some awk implementations reject printf's dynamic width and precision.
+function spaces(count, padding) {
+    while (count-- > 0) padding=padding " "
+    return padding
+}
 function axis(price, label) {
     label=sprintf("%.8g",price)
     if (length(label)>14) label=sprintf("%.7g",price)
@@ -163,7 +168,7 @@ function axis(price, label) {
 END {
     if (NR==0) exit 1
     if (cols<34 || rows<12) {
-        printf "%.*s\n",cols-1,"Resize terminal to 34x12."
+        print substr("Resize terminal to 34x12.",1,cols-1)
         exit
     }
     # Leave a spare column so drawing the final cell cannot wrap the frame.
@@ -200,8 +205,8 @@ END {
     title=sprintf("%s  %s  %s  %s",symbol,interval,exchange,price_label)
     # Keep the latest price visible when the full title cannot fit.
     if (length(title)>cols)
-        title=sprintf("%.*s  %s",cols-length(price_label)-2,symbol,price_label)
-    printf "%s%.*s%s\n",direction,cols,title,reset
+        title=substr(symbol,1,cols-length(price_label)-2) "  " price_label
+    printf "%s%s%s\n",direction,substr(title,1,cols),reset
     details=sprintf("O %.8g  H %.8g  L %.8g  C %.8g",open[last],high[last],low[last],closing[last])
     # A percentage off a nonpositive close misstates the direction or is undefined.
     if (last>1 && closing[last-1]>0) {
@@ -209,10 +214,10 @@ END {
         if (percent>=-1e6 && percent<=1e6) details=details sprintf("  %+.2f%%",percent)
         else if (percent>=-1e308 && percent<=1e308) details=details sprintf("  %+.2g%%",percent)
     }
-    printf "%.*s\n",cols,details
+    print substr(details,1,cols)
     details=status (offset ? " | History" : " | Latest") (sma ? " | SMA 20" : "")
     # Truncate status to the terminal width.
-    printf "%.*s\n",cols,details
+    print substr(details,1,cols)
     for (n=first; n<=last; n++) {
         top[n]=level(high[n]); bottom[n]=level(low[n])
         a=level(open[n]); b=level(closing[n])
@@ -247,7 +252,7 @@ END {
     }
     left=clocklabel(first); right=clocklabel(last)
     if (count>=length(left)+length(right)+1)
-        printf "%16s%s%*s%s\n","",left,count-length(left)-length(right),"",right
+        printf "%16s%s%s%s\n","",left,spaces(count-length(left)-length(right)),right
     else
         printf "%16s%s\n","",right
     printf "%16s%s\n","","UTC"
@@ -264,11 +269,12 @@ usage() {
     cat <<'HELP'
 Usage:
   ./trader.sh stock SYMBOL [INTERVAL] [--once]
-  ./trader.sh crypto BASE-QUOTE [INTERVAL] [EXCHANGE|auto] [--once]
+  ./trader.sh crypto SYMBOL [INTERVAL] [EXCHANGE|auto] [--once]
   ./trader.sh benchmark [BASE-QUOTE] [INTERVAL]
 
 Stock intervals: 1m 5m 15m 1h 1d (default 1d)
 Crypto intervals: 1m 5m 15m 1h 1d (default 5m)
+Crypto symbols: BTC, BTCUSD or BTC-USD. Use BASE-QUOTE for other quotes.
 Exchanges: coinbase, kraken, bitstamp, auto (default)
 Benchmark defaults: BTC-USD, 5m; five requests per exchange
 Chart keys: h/l older/newer, +/- zoom, i SMA, v volume, r refresh, q quit
@@ -303,7 +309,9 @@ esac
 if [[ $mode == stock ]]; then
     [[ $symbol =~ ^[A-Za-z0-9^][A-Za-z0-9.^=-]{0,23}$ ]] || die 'Invalid stock symbol.'
 else
-    [[ $symbol =~ ^[A-Za-z0-9]{1,12}-[A-Za-z0-9]{1,12}$ ]] || die 'Use a crypto pair such as BTC-USD.'
+    [[ $symbol =~ ^[A-Za-z0-9]{1,12}-[A-Za-z0-9]{1,12}$ ||
+        $symbol =~ ^[A-Za-z0-9]{1,12}$ ||
+        $symbol =~ ^[A-Za-z0-9]{2,12}[Uu][Ss][Dd]$ ]] || die 'Use a crypto symbol such as BTC or BTC-USD.'
 fi
 case $interval in
     1m) minutes=1 range=1d ;;
@@ -317,6 +325,14 @@ for dependency in curl jq awk sort mktemp mv date rm tr; do
     command -v "$dependency" >/dev/null || die "Missing dependency: $dependency"
 done
 symbol=$(printf '%s' "$symbol" | tr '[:lower:]' '[:upper:]') || die 'Cannot normalize symbol.'
+if [[ $mode != stock && $symbol != *-* ]]; then
+    # A compact USD pair takes precedence. Use BASE-QUOTE for ambiguous symbols.
+    if [[ $symbol =~ ^([A-Z0-9]{2,12})USD$ ]]; then
+        symbol=${BASH_REMATCH[1]}-USD
+    else
+        symbol=$symbol-USD
+    fi
+fi
 [[ -t 0 && -t 1 && ${TERM:-dumb} != dumb ]] || once=1
 if [[ $mode != benchmark ]]; then
     awk 'BEGIN { exit (strftime("%Y", 0) != "1970") }' </dev/null 2>/dev/null ||

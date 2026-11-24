@@ -12,7 +12,7 @@ change from that close.
 that file and run it with Bash. Clones also support `./trader` as an alias.
 
 Requires Bash, curl, jq 1.6+, and an awk with `strftime` support (GNU awk or
-current mawk). Use a UTF-8 terminal for chart glyphs.
+current mawk or BusyBox awk). Use a UTF-8 terminal for chart glyphs.
 
 ```sh
 git clone https://github.com/evalrjcom/sh-pro-trader.git
@@ -33,6 +33,10 @@ NO_COLOR=1 ./trader.sh crypto BTC-USD 5m coinbase --once
 | `v` | Toggle relative volume |
 | `r` | Refresh candles now |
 | `q` | Quit |
+
+Crypto accepts `BTC`, `BTCUSD`, and `BTC-USD` as the same pair.
+A bare asset defaults to USD. Use `BASE-QUOTE` for other quotes or to
+disambiguate an asset name that ends in USD, such as `FDUSD-USDC`.
 
 Both modes support `1m`, `5m`, `15m`, `1h` and `1d`. The terminal refreshes
 every 30 seconds. Refreshes keep the selected historical candle when it is

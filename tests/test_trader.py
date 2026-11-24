@@ -54,6 +54,16 @@ class TraderTests(unittest.TestCase):
         self.assertFalse((self.tmp / "yahoo").exists())
         self.assertFalse((self.tmp / "coinbase").exists())
 
+    def test_usd_crypto_shorthands_use_the_same_endpoint(self):
+        candle = coinbase((BASE, 100))
+        candle["url"] = "https://api.exchange.coinbase.com/products/BTC-USD/candles?granularity=300"
+        self.scenario(coinbase=[candle] * 3)
+        for symbol in ("btc", "btcusd", "BTC-USD"):
+            with self.subTest(symbol=symbol):
+                result = self.trader("crypto", symbol, "5m", "coinbase")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("BTC-USD  5m  coinbase  100", result.stdout)
+
     def test_yahoo_missing_volume_and_valid_flat_zero_price(self):
         url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC?interval=1d&range=1y"
         self.scenario(yahoo=[{"url": url, "body": {"chart": {"error": None, "result": [{
