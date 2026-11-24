@@ -30,9 +30,14 @@ NO_COLOR=1 ./trader crypto BTC-USD 5m coinbase --once
 | `q` | Quit |
 
 Both modes support `1m`, `5m`, `15m`, `1h` and `1d`. The terminal refreshes
-every 30 seconds and keeps the last successful chart if a refresh fails.
-`--once` or redirected output prints a single chart. Green solid candles closed
-at or above the open. Red shaded candles closed below the open.
+every 30 seconds. Refreshes keep the selected historical candle when it is
+still available. If the request fails or returns older data, the chart keeps
+its last successful data and marks it stale.
+
+`--once`, non-interactive use, or `TERM=dumb` prints a single chart. Green solid
+candles closed at or above the open. Red shaded candles closed below the open.
+A question mark in the volume row indicates an unavailable value. Each candle
+occupies one column, so gaps in trading time are compressed.
 
 ## Feeds and latency
 
@@ -46,6 +51,14 @@ be forming. This terminal displays market data and does not submit orders.
 It uses curl's total request time, including connection setup and response
 transfer, and counts only requests that return valid candles. Exchanges with a
 majority of successful requests rank ahead of those with fewer successes.
-Within each group, the lowest median wins. Crypto's default `auto` runs three
-requests per exchange at startup and uses the winner for that session. Results
-vary by region, connection and time.
+Within each group, the lowest median wins. The report includes zero-success
+venues, labels partial results, and exits with an error if every venue fails.
+Crypto's default `auto` runs three requests per exchange at startup and opens
+the last usable chart from the winner. Results vary by region, connection and
+time.
+
+## Run the regression tests
+
+Run `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v` from the
+repository root. The tests use simulated HTTP responses and a Unix
+pseudoterminal, so they require Python 3 and run without market-data access.

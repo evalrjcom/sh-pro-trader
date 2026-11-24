@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -uo pipefail
-export LC_ALL=C
-root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-source "$root/lib/feeds.bash"
+export LC_ALL=C TZ=UTC0
 
 usage() {
     cat <<'HELP'
@@ -22,35 +20,36 @@ HELP
 
 die() { printf '%s\n' "$*" >&2; exit 1; }
 [[ ${1:-} != --help && ${1:-} != -h && $# != 0 ]] || { usage; exit; }
-for dependency in curl jq awk sort tail mktemp; do
-    command -v "$dependency" >/dev/null || die "Missing dependency: $dependency"
-done
-tmp=$(mktemp -d) || exit 1
-trap 'rm -rf -- "$tmp"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+root=$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd) || die 'Cannot locate trader files.'
+# shellcheck source=lib/feeds.bash
+source "$root/lib/feeds.bash" || die 'Cannot load lib/feeds.bash.'
 
 mode=$1
 shift
 once=0
-if [[ ${*: -1} == --once ]]; then
+# Strip the flag only when an argument remains after the subcommand.
+if (( $# )) && [[ ${!#} == --once ]]; then
     once=1
     set -- "${@:1:$#-1}"
 fi
 case $mode in
     stock) (( $# >= 1 && $# <= 2 )) || die "$(usage)"
-        symbol=$1 interval=${2:-1d} exchange=yahoo ;;
+        symbol=$1 interval=${2-1d} exchange=yahoo ;;
     crypto) (( $# >= 1 && $# <= 3 )) || die "$(usage)"
-        symbol=$1 interval=${2:-5m} exchange=${3:-auto} ;;
+        symbol=$1 interval=${2-5m} exchange=${3-auto}
+        case $exchange in
+            auto|coinbase|kraken|bitstamp) ;;
+            *) die 'Choose coinbase, kraken, bitstamp or auto.' ;;
+        esac ;;
     benchmark) (( $# <= 2 && once == 0 )) || die "$(usage)"
-        symbol=${1:-BTC-USD} interval=${2:-5m} ;;
+        symbol=${1-BTC-USD} interval=${2-5m} ;;
     *) die "$(usage)" ;;
 esac
-symbol=$(printf '%s' "$symbol" | awk '{print toupper($0)}')
+# Validate before case conversion so command substitution cannot hide a trailing newline.
 if [[ $mode == stock ]]; then
-    [[ $symbol =~ ^[A-Z0-9^][A-Z0-9.^=-]{0,23}$ ]] || die 'Invalid stock symbol.'
+    [[ $symbol =~ ^[A-Za-z0-9^][A-Za-z0-9.^=-]{0,23}$ ]] || die 'Invalid stock symbol.'
 else
-    [[ $symbol =~ ^[A-Z0-9]{2,12}-[A-Z0-9]{2,12}$ ]] || die 'Use a crypto pair such as BTC-USD.'
+    [[ $symbol =~ ^[A-Za-z0-9]{2,12}-[A-Za-z0-9]{2,12}$ ]] || die 'Use a crypto pair such as BTC-USD.'
 fi
 case $interval in
     1m) minutes=1 range=1d ;;
@@ -60,83 +59,154 @@ case $interval in
     1d) minutes=1440 range=1y ;;
     *) die 'Unsupported interval. Choose 1m, 5m, 15m, 1h or 1d.' ;;
 esac
+for dependency in curl jq awk sort mktemp mv date rm tr; do
+    command -v "$dependency" >/dev/null || die "Missing dependency: $dependency"
+done
+symbol=$(printf '%s' "$symbol" | tr '[:lower:]' '[:upper:]') || die 'Cannot normalize symbol.'
+[[ -t 0 && -t 1 && ${TERM:-dumb} != dumb ]] || once=1
+if [[ $mode != benchmark ]]; then
+    awk 'BEGIN { exit (strftime("%Y", 0) != "1970") }' </dev/null 2>/dev/null ||
+        die 'An awk with strftime support is required.'
+fi
+tmp=$(mktemp -d) || die 'Cannot create a temporary workspace.'
+trap 'rm -rf -- "$tmp"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ $mode == benchmark ]]; then
-    benchmark 5 || die 'No exchange returned a usable chart for this pair.'
+    benchmark 5 || die 'Could not complete the benchmark.'
     printf '%-12s %10s %s\n' EXCHANGE MEDIAN_MS SUCCESS
-    awk '{printf "%-12s %10.1f %s/5\n", $3, $1*1000, $4}' "$tmp/ranked"
-    for venue in "${venues[@]}"; do
-        [[ -s $tmp/$venue ]] || printf '%-12s %10s %s\n' "$venue" '--' '0/5'
-    done
-    read -r _ _ winner _ < "$tmp/ranked"
-    printf '\nFastest eligible exchange from this connection: %s\n' "$winner"
+    awk '{ median = $4 ? sprintf("%.1f", $1*1000) : "--"
+           printf "%-12s %10s %s/5\n", $3, median, $4 }' "$tmp/ranked" ||
+        die 'Could not read the benchmark results.'
+    read -r _ tier winner _ < "$tmp/ranked" || die 'Missing benchmark results.'
+    case $tier in
+        0) printf '\nFastest eligible exchange from this connection: %s\n' "$winner" ;;
+        1) printf '\nLowest median among partial results: %s\n' "$winner" ;;
+        *) die 'No exchange returned usable candles for this pair and interval.' ;;
+    esac
     exit
 fi
-case $exchange in
-    auto)
-        printf 'Measuring %s candle latency...\n' "$symbol" >&2
-        benchmark 3 || die 'No exchange returned usable candles. Try a supported pair or check your connection.'
-        read -r _ _ exchange _ < "$tmp/ranked" ;;
-    yahoo|coinbase|kraken|bitstamp)
-        [[ $mode == stock || $exchange != yahoo ]] || die 'Yahoo is available in stock mode.' ;;
-    *) die 'Choose coinbase, kraken, bitstamp or auto.' ;;
-esac
 
-refresh() {
-    if fetch "$exchange" "$tmp/current" > "$tmp/latency"; then
-        mv "$tmp/current" "$tmp/chart"
-        status="Fetched $(date -u '+%H:%M:%S UTC') | REST"
-    else
-        status="Refresh failed | showing last successful data ($(cat "$tmp/error"))"
-        [[ -s $tmp/chart ]]
+candle_times=()
+candle_count=0 offset=0
+last_success=
+install_chart() {
+    local candidate=$1 timestamp index=0 selected=0 anchor=
+    local -a next_times=()
+    if (( offset )); then
+        anchor=${candle_times[candle_count-offset-1]}
+    fi
+    while IFS=$'\t' read -r timestamp _; do
+        next_times+=("$timestamp")
+        # Keep the selected candle, or the closest older candle if it disappeared.
+        if [[ -n $anchor ]] && (( timestamp <= anchor )); then
+            selected=$index
+        fi
+        ((index+=1))
+    done < "$candidate"
+    if (( index == 0 )); then
+        reason='empty chart'
+        return 1
+    fi
+    # A delayed upstream response must not rewind a session already showing newer data.
+    if (( candle_count && next_times[index-1] < candle_times[candle_count-1] )); then
+        reason='feed returned older candles'
+        return 1
+    fi
+    mv -- "$candidate" "$tmp/chart" || { reason='cannot replace chart data'; return 1; }
+    candle_times=("${next_times[@]}")
+    candle_count=$index
+    if [[ -n $anchor ]]; then
+        offset=$((candle_count-selected-1))
     fi
 }
 
-refresh || die "Unable to fetch $symbol from $exchange: $(cat "$tmp/error")"
-[[ -t 0 && -t 1 ]] || once=1
+refresh() {
+    reason=
+    if fetch "$exchange" "$tmp/current" "$tmp/error" >/dev/null; then
+        if install_chart "$tmp/current"; then
+            last_success=$(date -u '+%H:%M:%S UTC') || last_success='unknown time'
+            status="Fetched $last_success | REST"
+            return
+        fi
+    else
+        IFS= read -r reason < "$tmp/error" || :
+        reason=${reason:-request failed}
+    fi
+    status="Stale (last fetch $last_success) | $reason"
+    return 1
+}
+
+if [[ $exchange == auto ]]; then
+    printf 'Measuring %s candle latency...\n' "$symbol" >&2
+    benchmark 3 || die 'Could not complete exchange discovery.'
+    read -r _ tier exchange _ < "$tmp/ranked" || die 'Missing exchange discovery results.'
+    (( tier < 2 )) || die 'No exchange returned usable candles. Try another pair or check your connection.'
+    # Use the winning probe even if the provider failed on a later probe.
+    install_chart "$tmp/$exchange.candles" || die "Unable to load $exchange chart: $reason"
+    IFS= read -r last_success < "$tmp/$exchange.fetched" || last_success='unknown time'
+    status="Fetched $last_success | REST"
+    (( tier == 0 )) || printf 'Using %s with partial benchmark results.\n' "$exchange" >&2
+else
+    refresh || die "Unable to fetch $symbol from $exchange: $reason"
+fi
+
 color=0
 [[ -t 1 && -z ${NO_COLOR+x} && ${TERM:-dumb} != dumb ]] && color=1
-bars=60 offset=0 sma=1 volume=1
+bars=60 sma=1 volume=1
 last_refresh=$SECONDS
 previous_view=
 while :; do
     cols=90 rows=32
-    if [[ -t 1 ]]; then
-        if dimensions=$(stty size 2>/dev/null) && [[ $dimensions =~ ^([1-9][0-9]*)\ ([1-9][0-9]*)$ ]]; then
-            rows=${BASH_REMATCH[1]} cols=${BASH_REMATCH[2]}
-        fi
+    if [[ -t 1 ]] && dimensions=$(stty size <&1 2>/dev/null) &&
+        [[ $dimensions =~ ^([1-9][0-9]*)\ ([1-9][0-9]*)$ ]]; then
+        rows=${BASH_REMATCH[1]} cols=${BASH_REMATCH[2]}
     fi
     view=$cols:$rows:$bars:$offset:$sma:$volume:$status
     if [[ $view != "$previous_view" ]]; then
-        frame=$(awk -v cols="$cols" -v rows="$rows" -v bars="$bars" -v offset="$offset" \
-            -v sma="$sma" -v volume="$volume" -v color="$color" -v symbol="$symbol" \
-            -v interval="$interval" -v exchange="$exchange" -v status="$status" \
+        # Pass status as data so awk does not interpret backslash escapes in errors.
+        frame=$(TRADER_CHART_STATUS="$status" awk -v cols="$cols" -v rows="$rows" \
+            -v bars="$bars" -v offset="$offset" -v sma="$sma" -v volume="$volume" \
+            -v color="$color" -v symbol="$symbol" -v interval="$interval" -v exchange="$exchange" \
             -f "$root/lib/chart.awk" "$tmp/chart") || die 'Chart rendering failed.'
         if (( once )); then
-            printf '%s\n' "$frame"
+            printf '%s\n' "$frame" || exit 1
             break
         fi
-        printf '\033[H\033[2J%s\n' "$frame"
+        printf '\033[H\033[2J%s\n' "$frame" || exit 1
         if (( cols >= 63 )); then
             printf 'h/l History   +/- Zoom   i SMA   v Volume   r Refresh   q Quit'
-        else
+        elif (( cols >= 19 )); then
             printf 'h/l  +/-  i  v  r  q'
         fi
         previous_view=$view
     fi
     key=
-    IFS= read -rsn1 -t 1 key || :
-    case $key in
-        q|Q) break ;;
-        h) (( offset < $(wc -l < "$tmp/chart") - 1 )) && ((offset+=1)) ;;
-        l) (( offset > 0 )) && ((offset-=1)) ;;
-        +|=) (( bars > 10 )) && ((bars-=5)) ;;
-        -) (( bars < 300 )) && ((bars+=5)) ;;
-        i) ((sma=1-sma)) ;;
-        v) ((volume=1-volume)) ;;
-    esac
+    # Timeout keeps the refresh timer running. EOF or a lost TTY ends the loop.
+    if IFS= read -rsn1 -t 1 key; then
+        case $key in
+            q|Q) break ;;
+            h) (( offset < candle_count - 1 )) && ((offset+=1)) ;;
+            l) (( offset > 0 )) && ((offset-=1)) ;;
+            +|=)
+                visible=$bars
+                (( visible <= cols - 17 )) || visible=$((cols-17))
+                (( visible <= candle_count - offset )) || visible=$((candle_count-offset))
+                if (( visible > 10 )); then
+                    bars=$((visible-5))
+                    (( bars >= 10 )) || bars=10
+                fi ;;
+            -) (( bars < 300 )) && ((bars+=5)) ;;
+            i) ((sma=1-sma)) ;;
+            v) ((volume=1-volume)) ;;
+        esac
+    elif (( $? <= 128 )); then
+        break
+    fi
     if [[ $key == r ]] || (( SECONDS - last_refresh >= 30 )); then
-        refresh
+        refresh || :
         previous_view=
         last_refresh=$SECONDS
     fi
