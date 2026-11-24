@@ -42,7 +42,7 @@ class TraderTests(unittest.TestCase):
         (self.tmp / "responses.json").write_text(json.dumps(venues))
 
     def trader(self, *args):
-        return subprocess.run([ROOT / "trader", *args], env=self.env,
+        return subprocess.run([ROOT / "trader.sh", *args], env=self.env,
                               capture_output=True, text=True, timeout=10)
 
     def test_arguments_fail_before_fetch(self):
@@ -117,32 +117,12 @@ class TraderTests(unittest.TestCase):
         self.assertEqual(result.stdout.count("0/5"), 3)
         self.assertIn("No exchange returned usable candles", result.stderr)
 
-    def test_narrow_chart_reserves_the_last_column(self):
-        env = dict(self.env, TRADER_CHART_STATUS="Fetched 12:00:00 UTC | REST")
-        chart = subprocess.run(
-            ["awk", "-v", "cols=34", "-v", "rows=12", "-v", "bars=60", "-v", "volume=1",
-             "-v", "symbol=VERYLONGSTOCKSYMBOL123456", "-v", "interval=1m",
-             "-v", "exchange=yahoo", "-f", ROOT / "lib/chart.awk"],
-            input=f"{BASE}\t1e300\t1e300\t-1e300\t-1e300\t1e300\n",
-            env=env, capture_output=True, text=True, timeout=5,
-        )
-        self.assertEqual(chart.returncode, 0, chart.stderr)
-        self.assertIn("UTC", chart.stdout)
-        for line in chart.stdout.splitlines():
-            self.assertLess(len(line), 34, line)
-
-    def test_refresh_keeps_history_anchor_and_stale_data(self):
-        self.scenario(coinbase=[
-            coinbase((BASE, 100), (BASE+300, 110)),
-            coinbase((BASE, 100), (BASE+300, 110), (BASE+600, 120)),
-            {},
-            coinbase((BASE, 90), (BASE+300, 95)),
-        ])
+    def terminal(self, *args, rows=30, cols=60):
         master, slave = pty.openpty()
         self.addCleanup(os.close, master)
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 60, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         try:
-            process = subprocess.Popen([ROOT / "trader", "crypto", "BTC-USD", "5m", "coinbase"],
+            process = subprocess.Popen([ROOT / "trader.sh", *args],
                                        env=self.env, stdin=slave, stdout=slave, stderr=slave)
         finally:
             os.close(slave)
@@ -165,6 +145,28 @@ class TraderTests(unittest.TestCase):
                 captured.extend(os.read(master, 65536))
             return captured.split(FOOTER)[0]
 
+        return master, process, frame
+
+    def test_narrow_chart_reserves_the_last_column(self):
+        self.scenario(coinbase=[{"body": [[BASE, -1e300, 1e300, 1e300, -1e300, 1e300]]}])
+        master, process, frame = self.terminal(
+            "crypto", "LONGTOKENSYM-LONGQUOTEABC", "1m", "coinbase", rows=12, cols=34,
+        )
+        output = frame().replace(b"\x1b[H\x1b[2J", b"", 1).decode()
+        self.assertIn("UTC", output)
+        for line in output.splitlines():
+            self.assertLess(len(line), 34, line)
+        os.write(master, b"q")
+        self.assertEqual(process.wait(timeout=5), 0)
+
+    def test_refresh_keeps_history_anchor_and_stale_data(self):
+        self.scenario(coinbase=[
+            coinbase((BASE, 100), (BASE+300, 110)),
+            coinbase((BASE, 100), (BASE+300, 110), (BASE+600, 120)),
+            {},
+            coinbase((BASE, 90), (BASE+300, 95)),
+        ])
+        master, process, frame = self.terminal("crypto", "BTC-USD", "5m", "coinbase")
         self.assertIn(b"coinbase  110", frame())
         older = frame(b"h")
         self.assertIn(b"coinbase  100", older)

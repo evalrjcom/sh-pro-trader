@@ -7,17 +7,21 @@ The percentage next to OHLC is the change from the previous candle's close.
 
 ## Run
 
+`trader.sh` contains the complete program as a single file. Download or copy
+that file and run it with Bash. Clones also support `./trader` as an alias.
+
 Requires Bash, curl, jq 1.6+, and an awk with `strftime` support (GNU awk or
 current mawk). Use a UTF-8 terminal for chart glyphs.
 
 ```sh
 git clone https://github.com/evalrjcom/sh-pro-trader.git
 cd sh-pro-trader
-./trader stock AAPL 1d
-./trader crypto BTC-USD 5m
-./trader crypto ETH-USD 1h kraken
-./trader benchmark BTC-USD 5m
-NO_COLOR=1 ./trader crypto BTC-USD 5m coinbase --once
+chmod +x trader.sh
+./trader.sh stock AAPL 1d
+./trader.sh crypto BTC-USD 5m
+./trader.sh crypto ETH-USD 1h kraken
+./trader.sh benchmark BTC-USD 5m
+NO_COLOR=1 ./trader.sh crypto BTC-USD 5m coinbase --once
 ```
 
 | Key | Action |
