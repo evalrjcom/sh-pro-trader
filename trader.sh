@@ -17,23 +17,24 @@ fetch() {
             # shellcheck disable=SC2016 # These variables belong to jq.
             filter='.chart | select(.error == null) | .result[0] as $r |
                 $r.indicators.quote[0] as $q |
-                [$r.timestamp | keys[] as $i | [ .[$i], $q.open[$i], $q.high[$i],
+                [$r.timestamp | arrays | keys[] as $i | [ .[$i], $q.open[$i], $q.high[$i],
                  $q.low[$i], $q.close[$i], $q.volume[$i] ]]' ;;
         coinbase)
             seconds=$((minutes * 60))
             url="https://api.exchange.coinbase.com/products/$symbol/candles?granularity=$seconds"
-            filter='map([.[0], .[3], .[2], .[1], .[4], .[5]])' ;;
+            # jq map also accepts objects. Require the documented candle array.
+            filter='arrays | map(arrays | [.[0], .[3], .[2], .[1], .[4], .[5]])' ;;
         kraken)
             pair=${symbol/-/}
             url="https://api.kraken.com/0/public/OHLC?pair=$pair&interval=$minutes"
             filter='select(.error == []) | .result | del(.last) | to_entries |
-                select(length == 1) | .[0].value |
-                map([.[0], .[1], .[2], .[3], .[4], .[6]])' ;;
+                select(length == 1) | .[0].value | arrays |
+                map(arrays | [.[0], .[1], .[2], .[3], .[4], .[6]])' ;;
         bitstamp)
             pair=$(printf '%s' "${symbol/-/}" | tr '[:upper:]' '[:lower:]')
             seconds=$((minutes * 60))
             url="https://www.bitstamp.net/api/v2/ohlc/$pair/?step=$seconds&limit=300"
-            filter='.data.ohlc | map([.timestamp, .open, .high, .low, .close, .volume])' ;;
+            filter='.data.ohlc | arrays | map(objects | [.timestamp, .open, .high, .low, .close, .volume])' ;;
         *) printf 'unknown exchange\n' > "$error"; return 1 ;;
     esac
 
@@ -74,15 +75,27 @@ fetch() {
 }
 
 benchmark() {
-    local samples=$1 round venue pid
+    local samples=$1 round venue pid elapsed probe saved
     local -a pids
     for venue in "${venues[@]}"; do : > "$tmp/$venue.times" || return 1; done
     for ((round=1; round<=samples; round++)); do
         pids=()
         for venue in "${venues[@]}"; do
             (
-                if fetch "$venue" "$tmp/$venue.candles" "$tmp/$venue.error" >> "$tmp/$venue.times"; then
-                    date -u '+%H:%M:%S UTC' > "$tmp/$venue.fetched"
+                probe=$tmp/$venue.probe
+                saved=$tmp/$venue.candles
+                if elapsed=$(fetch "$venue" "$probe" "$tmp/$venue.error"); then
+                    # Count all successful timings, but start the chart from
+                    # the probe with the newest candle timestamp.
+                    if [[ ! -s $saved ]] || awk -F '\t' '
+                        NR==FNR { saved=$1+0; next }
+                        { probe=$1+0 }
+                        END { exit (probe<saved) }
+                    ' "$saved" "$probe"; then
+                        mv -- "$probe" "$saved" || exit 1
+                        date -u '+%H:%M:%S UTC' > "$tmp/$venue.fetched"
+                    fi
+                    printf '%s\n' "$elapsed" >> "$tmp/$venue.times"
                 fi
             ) &
             pids+=("$!")
@@ -102,7 +115,7 @@ benchmark() {
                 } else {
                     printf "0 2 %s 0\n", venue
                 }
-            }'
+            }' || return 1
     done | sort -k2,2n -k1,1n -k3,3 > "$tmp/ranked"
 }
 
@@ -183,10 +196,19 @@ END {
     floor-=margin
     change=last>1 ? closing[last]-closing[last-1] : 0
     direction=change<0 ? down : up
-    title=sprintf("%s  %s  %s  %.8g",symbol,interval,exchange,closing[last])
+    price_label=sprintf("%.8g",closing[last])
+    title=sprintf("%s  %s  %s  %s",symbol,interval,exchange,price_label)
+    # Keep the latest price visible when the full title cannot fit.
+    if (length(title)>cols)
+        title=sprintf("%.*s  %s",cols-length(price_label)-2,symbol,price_label)
     printf "%s%.*s%s\n",direction,cols,title,reset
     details=sprintf("O %.8g  H %.8g  L %.8g  C %.8g",open[last],high[last],low[last],closing[last])
-    if (last>1 && closing[last-1]!=0) details=details sprintf("  %+.2f%%",100*change/closing[last-1])
+    # A percentage off a nonpositive close misstates the direction or is undefined.
+    if (last>1 && closing[last-1]>0) {
+        percent=(change/closing[last-1])*100
+        if (percent>=-1e6 && percent<=1e6) details=details sprintf("  %+.2f%%",percent)
+        else if (percent>=-1e308 && percent<=1e308) details=details sprintf("  %+.2g%%",percent)
+    }
     printf "%.*s\n",cols,details
     details=status (offset ? " | History" : " | Latest") (sma ? " | SMA 20" : "")
     # Truncate status to the terminal width.
@@ -281,7 +303,7 @@ esac
 if [[ $mode == stock ]]; then
     [[ $symbol =~ ^[A-Za-z0-9^][A-Za-z0-9.^=-]{0,23}$ ]] || die 'Invalid stock symbol.'
 else
-    [[ $symbol =~ ^[A-Za-z0-9]{2,12}-[A-Za-z0-9]{2,12}$ ]] || die 'Use a crypto pair such as BTC-USD.'
+    [[ $symbol =~ ^[A-Za-z0-9]{1,12}-[A-Za-z0-9]{1,12}$ ]] || die 'Use a crypto pair such as BTC-USD.'
 fi
 case $interval in
     1m) minutes=1 range=1d ;;

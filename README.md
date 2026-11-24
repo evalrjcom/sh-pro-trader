@@ -3,7 +3,8 @@
 A Bash terminal for charting stocks and spot crypto. It fetches OHLCV candles with
 `curl` and renders them in the terminal with a price axis, UTC timestamps,
 volume, a 20-candle simple moving average and the selected candle's OHLC values.
-The percentage next to OHLC is the change from the previous candle's close.
+When the previous close is positive, the percentage next to OHLC shows the
+change from that close.
 
 ## Run
 
@@ -58,7 +59,7 @@ majority of successful requests rank ahead of those with fewer successes.
 Within each group, the lowest median wins. The report includes zero-success
 venues, labels partial results, and exits with an error if every venue fails.
 Crypto's default `auto` runs three requests per exchange at startup and opens
-the last usable chart from the winner. Results vary by region, connection and
+the chart with the newest candle timestamp from the winner. Results vary by region, connection and
 time.
 
 ## Run the regression tests

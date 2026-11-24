@@ -98,6 +98,40 @@ class TraderTests(unittest.TestCase):
         self.assertIn("BTC-USD  5m  coinbase  101", result.stdout)
         self.assertEqual((self.tmp / "coinbase").read_text(), "3")
 
+    def test_auto_keeps_newest_probe_when_later_success_is_older(self):
+        self.scenario(coinbase=[coinbase((BASE+600, 110)), coinbase((BASE, 90)),
+                                coinbase((BASE+300, 100))])
+        result = self.trader("crypto", "BTC-USD")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("BTC-USD  5m  coinbase  110", result.stdout)
+
+    def test_rejects_object_disguised_as_candle_array(self):
+        self.scenario(coinbase=[{"body": {"unexpected": coinbase((BASE, 100))["body"][0]}}])
+        result = self.trader("crypto", "BTC-USD", "5m", "coinbase")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("invalid candle response", result.stderr)
+
+    def test_standalone_copy_supports_single_letter_asset(self):
+        isolated = self.tmp / "isolated"
+        isolated.mkdir()
+        script = isolated / "trader.sh"
+        shutil.copy2(ROOT / "trader.sh", script)
+        candle = coinbase((BASE, 100))
+        candle["url"] = "https://api.exchange.coinbase.com/products/W-USD/candles?granularity=300"
+        self.scenario(coinbase=[candle])
+        result = subprocess.run([script, "crypto", "w-usd", "5m", "coinbase"], cwd=isolated,
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("W-USD  5m  coinbase  100", result.stdout)
+        self.assertEqual(list(isolated.iterdir()), [script])
+
+    def test_price_rise_from_negative_close_has_no_misleading_percent(self):
+        self.scenario(coinbase=[coinbase((BASE, -10), (BASE+300, -5))])
+        result = self.trader("crypto", "BTC-USD", "5m", "coinbase")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("C -5", result.stdout)
+        self.assertNotIn("%", result.stdout)
+
     def test_benchmark_prioritizes_majority_and_reports_failures(self):
         successful = {"body": {"error": [], "result": {
             "XXBTZUSD": [[BASE, "1", "2", "1", "2", "0", "12", 10]], "last": BASE+60}},
@@ -154,6 +188,7 @@ class TraderTests(unittest.TestCase):
         )
         output = frame().replace(b"\x1b[H\x1b[2J", b"", 1).decode()
         self.assertIn("UTC", output)
+        self.assertIn("-1e+300", output.splitlines()[0])
         for line in output.splitlines():
             self.assertLess(len(line), 34, line)
         os.write(master, b"q")
