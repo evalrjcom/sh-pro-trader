@@ -160,7 +160,8 @@ last_refresh=$SECONDS
 previous_view=
 while :; do
     cols=90 rows=32
-    if [[ -t 1 ]] && dimensions=$(stty size <&1 2>/dev/null) &&
+    # Keep stty on the terminal input. The substitution captures stdout.
+    if [[ -t 0 && -t 1 ]] && dimensions=$(stty size 2>/dev/null) &&
         [[ $dimensions =~ ^([1-9][0-9]*)\ ([1-9][0-9]*)$ ]]; then
         rows=${BASH_REMATCH[1]} cols=${BASH_REMATCH[2]}
     fi

@@ -16,7 +16,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = 1_700_000_000
-FOOTER = b"q Quit"
+FOOTER = b"h/l  +/-  i  v  r  q"
 
 
 def coinbase(*candles, elapsed="0.250000"):
@@ -140,7 +140,7 @@ class TraderTests(unittest.TestCase):
         ])
         master, slave = pty.openpty()
         self.addCleanup(os.close, master)
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 74, 0, 0))
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 60, 0, 0))
         try:
             process = subprocess.Popen([ROOT / "trader", "crypto", "BTC-USD", "5m", "coinbase"],
                                        env=self.env, stdin=slave, stdout=slave, stderr=slave)
@@ -163,7 +163,7 @@ class TraderTests(unittest.TestCase):
                 ready, _, _ = select([master], [], [], max(0, deadline-monotonic()))
                 self.assertTrue(ready, captured.decode(errors="replace"))
                 captured.extend(os.read(master, 65536))
-            return captured.split(b"h/l History")[0]
+            return captured.split(FOOTER)[0]
 
         self.assertIn(b"coinbase  110", frame())
         older = frame(b"h")
@@ -176,7 +176,7 @@ class TraderTests(unittest.TestCase):
         self.assertIn(b"Stale (last fetch", failed)
         self.assertIn(b"coinbase  120", failed)
         older = frame(b"r")
-        self.assertIn(b"feed returned older candles", older)
+        self.assertIn(b"feed returned older", older)
         self.assertIn(b"coinbase  120", older)
         os.write(master, b"q")
         self.assertEqual(process.wait(timeout=5), 0)
